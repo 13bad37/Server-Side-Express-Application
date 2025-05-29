@@ -1,6 +1,13 @@
 const knex = require('../db/knex');
 
-async function getProfile(req, res, next) {
+function isValidDateString(dob) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dob)) return false;
+  const [Y, M, D] = dob.split('-').map(n => parseInt(n,10));
+  const dt = new Date(dob);
+  return dt.getFullYear() === Y && dt.getMonth()+1 === M && dt.getDate() === D;
+}
+
+exports.getProfile = async (req, res, next) => {
   try {
     const { email } = req.params;
     const user = await knex('users').where({ email }).first();
@@ -20,15 +27,15 @@ async function getProfile(req, res, next) {
 
     return res.json({
       ...base,
-      dob:     user.dob    ? user.dob.toISOString().slice(0,10) : null,
+      dob:     user.dob     ? user.dob.toISOString().slice(0,10) : null,
       address: user.address || null
     });
   } catch (err) {
     next(err);
   }
-}
+};
 
-async function updateProfile(req, res, next) {
+exports.updateProfile = async (req, res, next) => {
   try {
     const { email } = req.params;
     const user = await knex('users').where({ email }).first();
@@ -36,7 +43,10 @@ async function updateProfile(req, res, next) {
       return res.status(404).json({ error: true, message: 'User not found' });
     }
     if (!req.user) {
-      return res.status(401).json({ error: true, message: "Authorization header ('Bearer token') not found" });
+      return res.status(401).json({
+        error: true,
+        message: "Authorization header ('Bearer token') not found"
+      });
     }
     if (req.user.id !== user.id) {
       return res.status(403).json({ error: true, message: 'Forbidden' });
@@ -55,10 +65,17 @@ async function updateProfile(req, res, next) {
         message: 'Request body invalid: firstName, lastName and address must be strings only.'
       });
     }
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(dob) || isNaN(Date.parse(dob))) {
+    if (!isValidDateString(dob)) {
       return res.status(400).json({
         error: true,
         message: 'Invalid input: dob must be a real date in format YYYY-MM-DD.'
+      });
+    }
+    const dt = new Date(dob);
+    if (dt > new Date()) {
+      return res.status(400).json({
+        error: true,
+        message: 'Invalid input: dob must be a date in the past.'
       });
     }
 
@@ -75,6 +92,4 @@ async function updateProfile(req, res, next) {
   } catch (err) {
     next(err);
   }
-}
-
-module.exports = { getProfile, updateProfile };
+};

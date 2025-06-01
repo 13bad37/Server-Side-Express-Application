@@ -1,79 +1,67 @@
-const knex = require('../db/knex');
+const knex = require('../db/knex')
 
-// Helper: extract numeric value from rating strings (including decimals)
-const parseRating = (rating) => {
-  if (rating === null || rating === undefined || rating === '') {
-    return null;
-  }
-  const ratingStr = String(rating).trim();
-  if (!ratingStr) return null;
-
-  const match = ratingStr.match(/(\d+(?:\.\d+)?)/);
-  if (!match) return null;
-
-  const n = parseFloat(match[1]);
-  return Number.isNaN(n) ? null : n;
-};
+// parse rating into number or null
+const parseRating = (r) => {
+  if (r == null || r === '') return null
+  const n = parseFloat(r)
+  return Number.isNaN(n) ? null : n
+}
 
 exports.searchMovies = async (req, res, next) => {
   try {
-    const { title, year, page = 1 } = req.query;
-    const pg = parseInt(page, 10);
-    const limit = 100;
+    // only allow title, year, page
+    const allowed = ['title', 'year', 'page']
+    const invalid = Object.keys(req.query).filter(k => !allowed.includes(k))
+    if (invalid.length > 0) {
+      return res
+        .status(400)
+        .json({ error: true, message: 'Query parameters are not permitted.' })
+    }
 
-    // Validate page
+    const { title, year, page = 1 } = req.query
+    const pg = parseInt(page, 10)
     if (isNaN(pg) || pg < 1) {
       return res
         .status(400)
-        .json({ error: true, message: 'Invalid page format. page must be a number.' });
+        .json({ error: true, message: 'Invalid page format. page must be a number.' })
     }
-    // Validate year if provided
     if (year && !/^\d{4}$/.test(year)) {
       return res
         .status(400)
-        .json({ error: true, message: 'Invalid year format. Format must be yyyy.' });
+        .json({ error: true, message: 'Invalid year format. Format must be yyyy.' })
     }
 
-    // Apply title/year filters when building a query
+    const limit = 100
     const applyFilters = (qb) => {
-      if (title) qb.where('b.primaryTitle', 'like', `%${title}%`);
-      if (year) qb.where('b.year', year);
-      return qb;
-    };
+      if (title) qb.where('b.primaryTitle', 'like', `%${title}%`)
+      if (year) qb.where('b.year', year)
+      return qb
+    }
 
-    // 1) Count how many movies match
-    const countResult = await knex('basics as b')
+    // count total matches
+    const cnt = await knex('basics as b')
       .modify(applyFilters)
       .count('b.tconst as count')
-      .first();
-    const total = parseInt(countResult.count, 10) || 0;
-    const lastPage = total === 0 ? 0 : Math.ceil(total / limit);
+      .first()
+    const total = parseInt(cnt.count, 10) || 0
+    const lastPage = total === 0 ? 0 : Math.ceil(total / limit)
 
-    // 2) Fetch current-page rows if in bounds
-    let rawData = [];
+    // fetch rows if within range
+    let raw = []
     if (pg <= lastPage && total > 0) {
-      rawData = await knex('basics as b')
+      raw = await knex('basics as b')
         .modify(applyFilters)
         .leftJoin('ratings as r_imdb', function () {
-          this.on('b.tconst', '=', 'r_imdb.tconst').andOn(
-            'r_imdb.source',
-            '=',
-            knex.raw('?', ['Internet Movie Database'])
-          );
+          this.on('b.tconst', '=', 'r_imdb.tconst')
+            .andOn('r_imdb.source', '=', knex.raw('?', ['Internet Movie Database']))
         })
         .leftJoin('ratings as r_rt', function () {
-          this.on('b.tconst', '=', 'r_rt.tconst').andOn(
-            'r_rt.source',
-            '=',
-            knex.raw('?', ['Rotten Tomatoes'])
-          );
+          this.on('b.tconst', '=', 'r_rt.tconst')
+            .andOn('r_rt.source', '=', knex.raw('?', ['Rotten Tomatoes']))
         })
         .leftJoin('ratings as r_mc', function () {
-          this.on('b.tconst', '=', 'r_mc.tconst').andOn(
-            'r_mc.source',
-            '=',
-            knex.raw('?', ['Metacritic'])
-          );
+          this.on('b.tconst', '=', 'r_mc.tconst')
+            .andOn('r_mc.source', '=', knex.raw('?', ['Metacritic']))
         })
         .select(
           'b.primaryTitle as title',
@@ -86,38 +74,37 @@ exports.searchMovies = async (req, res, next) => {
         )
         .orderBy('b.tconst', 'asc')
         .limit(limit)
-        .offset((pg - 1) * limit);
+        .offset((pg - 1) * limit)
     }
 
-    // 3) Normalize each row’s ratings + classification
-    const data = rawData.map((m) => ({
+    const data = raw.map(m => ({
       title: m.title,
       year: m.year,
       imdbID: m.imdbID,
       classification: m.classification === null ? null : m.classification,
       imdbRating: parseRating(m.imdbRating),
       rottenTomatoesRating: parseRating(m.rottenTomatoesRating),
-      metacriticRating: parseRating(m.metacriticRating),
-    }));
+      metacriticRating: parseRating(m.metacriticRating)
+    }))
 
-    // 4) Build pagination fields
-    let prevPage = 0;
-    let nextPage = 0;
-    let from = 0;
-    let to = 0;
+    // build pagination fields (use null rather than 0)
+    let prevPage = null, nextPage = null, from = 0, to = 0
 
-    if (pg >= 1 && pg <= lastPage && total > 0) {
-      const offset = (pg - 1) * limit;
-      from = offset + 1;                // 1-based start index
-      to = offset + data.length;        // 1-based end index
-      prevPage = pg > 1 ? pg - 1 : 0;
-      nextPage = pg < lastPage ? pg + 1 : 0;
+    if (total === 0) {
+      // no matches: keep all zeros or nulls
+
+    } else if (pg > lastPage) {
+      // out of bounds: show last page indices
+      prevPage = lastPage > 0 ? lastPage : null
+      from = lastPage * limit
+      to = lastPage * limit
+
     } else {
-      // out-of-bounds or no results: from/to remain 0, prevPage/nextPage remain 0
-      from = 0;
-      to = 0;
-      prevPage = 0;
-      nextPage = 0;
+      // valid page
+      prevPage = pg > 1 ? pg - 1 : null
+      nextPage = pg < lastPage ? pg + 1 : null
+      from = (pg - 1) * limit
+      to = from + data.length
     }
 
     return res.json({
@@ -130,40 +117,36 @@ exports.searchMovies = async (req, res, next) => {
         prevPage,
         nextPage,
         from,
-        to,
-      },
-    });
+        to
+      }
+    })
   } catch (err) {
-    next(err);
+    next(err)
   }
-};
+}
 
 exports.getMovieData = async (req, res, next) => {
   try {
-    const { imdbID } = req.params;
+    if (Object.keys(req.query).length > 0) {
+      return res
+        .status(400)
+        .json({ error: true, message: 'Query parameters are not permitted.' })
+    }
 
+    const { imdbID } = req.params
     const movie = await knex('basics as b')
       .where('b.tconst', imdbID)
       .leftJoin('ratings as r_imdb', function () {
-        this.on('b.tconst', '=', 'r_imdb.tconst').andOn(
-          'r_imdb.source',
-          '=',
-          knex.raw('?', ['Internet Movie Database'])
-        );
+        this.on('b.tconst', '=', 'r_imdb.tconst')
+          .andOn('r_imdb.source', '=', knex.raw('?', ['Internet Movie Database']))
       })
       .leftJoin('ratings as r_rt', function () {
-        this.on('b.tconst', '=', 'r_rt.tconst').andOn(
-          'r_rt.source',
-          '=',
-          knex.raw('?', ['Rotten Tomatoes'])
-        );
+        this.on('b.tconst', '=', 'r_rt.tconst')
+          .andOn('r_rt.source', '=', knex.raw('?', ['Rotten Tomatoes']))
       })
       .leftJoin('ratings as r_mc', function () {
-        this.on('b.tconst', '=', 'r_mc.tconst').andOn(
-          'r_mc.source',
-          '=',
-          knex.raw('?', ['Metacritic'])
-        );
+        this.on('b.tconst', '=', 'r_mc.tconst')
+          .andOn('r_mc.source', '=', knex.raw('?', ['Metacritic']))
       })
       .select(
         'b.primaryTitle as title',
@@ -171,49 +154,53 @@ exports.getMovieData = async (req, res, next) => {
         'b.runtimeMinutes as runtime',
         'b.genres',
         'b.country',
+        'b.boxoffice',
         'r_imdb.value as imdbRating',
         'r_rt.value as rottenTomatoesRating',
         'r_mc.value as metacriticRating',
         'b.poster',
         'b.plot'
       )
-      .first();
+      .first()
 
     if (!movie) {
       return res
         .status(404)
-        .json({ error: true, message: 'No record exists of a movie with this ID' });
+        .json({ error: true, message: 'No record exists of a movie with this ID' })
     }
 
-    // Convert comma-separated strings into arrays
-    movie.genres = movie.genres ? movie.genres.split(',') : [];
-    movie.country = movie.country ? movie.country.split(',') : [];
+    movie.genres = movie.genres ? movie.genres.split(',') : []
+    movie.country = movie.country ? movie.country.split(',') : []
 
-    // Build a “ratings” array and remove raw rating fields
     movie.ratings = [
       { source: 'Internet Movie Database', value: parseRating(movie.imdbRating) },
-      { source: 'Rotten Tomatoes', value: parseRating(movie.rottenTomatoesRating) },
-      { source: 'Metacritic', value: parseRating(movie.metacriticRating) },
-    ];
-    delete movie.imdbRating;
-    delete movie.rottenTomatoesRating;
-    delete movie.metacriticRating;
+      { source: 'Rotten Tomatoes',         value: parseRating(movie.rottenTomatoesRating) },
+      { source: 'Metacritic',               value: parseRating(movie.metacriticRating) }
+    ]
+    delete movie.imdbRating
+    delete movie.rottenTomatoesRating
+    delete movie.metacriticRating
 
-    // Fetch “principals” (cast/crew) and parse the JSON in characters
     const principals = await knex('principals as p')
       .leftJoin('names as n', 'p.nconst', 'n.nconst')
-      .select('p.nconst as id', 'n.primaryName as name', 'p.category', 'p.characters')
-      .where('p.tconst', imdbID);
+      .select(
+        'p.nconst as id',
+        'n.primaryName as name',
+        'p.category',
+        'p.characters'
+      )
+      .where('p.tconst', imdbID)
 
-    movie.principals = principals.map((p) => ({
+    movie.principals = principals.map(p => ({
       id: p.id,
       name: p.name,
       category: p.category,
-      characters: p.characters ? JSON.parse(p.characters) : [],
-    }));
+      characters: p.characters ? JSON.parse(p.characters) : []
+    }))
 
-    return res.json(movie);
+    movie.boxoffice = movie.boxoffice !== null ? movie.boxoffice : null
+    return res.json(movie)
   } catch (err) {
-    next(err);
+    next(err)
   }
-};
+}

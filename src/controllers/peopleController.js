@@ -1,72 +1,112 @@
-const knex = require('../db/knex');
+const knex = require('../db/knex')
 
-/**
- * GET /people/:id
- *   (JWT required)
- * Returns one person’s basic info from `names` by IMDB ID (nconst).
- */
+// parse rating into number or null
+const parseRating = (r) => {
+  if (r == null || r === '') return null
+  const n = parseFloat(r)
+  return Number.isNaN(n) ? null : n
+}
+
 exports.getPerson = async (req, res, next) => {
   try {
-    const { id } = req.params; // route is /people/:id
+    if (Object.keys(req.query).length > 0) {
+      return res.status(400).json({ error: true, message: 'Query parameters are not permitted.' })
+    }
+
+    const { id } = req.params
     const person = await knex('names')
-      .select('primaryName as name', 'birthYear', 'deathYear')
+      .select('nconst as id', 'primaryName as name', 'birthYear', 'deathYear')
       .where({ nconst: id })
-      .first();
+      .first()
 
     if (!person) {
-      return res
-        .status(404)
-        .json({ error: true, message: 'No record exists of a person with this ID' });
+      return res.status(404).json({ error: true, message: 'No record exists of a person with this ID' })
     }
 
-    return res.json(person);
-  } catch (err) {
-    console.error('❌ GET /people/:id:', err.message);
-    return res.status(500).json({ error: true, message: err.message });
-  }
-};
-
-/**
- * GET /people/:id/credits
- *   (JWT required)
- * Returns person’s “principals” (cast/crew) credits ordered by movie title.
- */
-exports.getPersonCredits = async (req, res, next) => {
-  try {
-    const { id } = req.params; // route is /people/:id/credits
-
-    // Ensure the person exists in `names`
-    const person = await knex('names').where({ nconst: id }).first();
-    if (!person) {
-      return res.status(404).json({ error: true, message: 'Person not found' });
-    }
-
-    // Join principals - basics = ratings (using r.imdbRating)
-    const credits = await knex('principals as p')
+    // fetch credits, sort by year then by title ignoring "The "
+    const rawRoles = await knex('principals as p')
       .innerJoin('basics as b', 'p.tconst', 'b.tconst')
-      .leftJoin('ratings as r', 'b.tconst', 'r.imdbID')
-      .where('p.nconst', id)
+      .leftJoin('ratings as r_imdb', function () {
+        this.on('b.tconst', '=', 'r_imdb.tconst')
+          .andOn('r_imdb.source', '=', knex.raw('?', ['Internet Movie Database']))
+      })
       .select(
-        'b.primaryTitle    as movieName',
-        'b.tconst          as movieId',
+        'b.primaryTitle as movieName',
+        'b.tconst       as movieId',
+        'b.year         as year',
         'p.category',
         'p.characters',
-        'r.imdbRating      as imdbRating'
+        'r_imdb.value   as imdbRating'
       )
-      .orderBy('b.primaryTitle', 'asc');
+      .where('p.nconst', id)
+      .orderBy([
+        { column: 'b.year',         order: 'asc' },
+        // strip leading "The " when sorting titles
+        { column: knex.raw("CASE WHEN b.primaryTitle LIKE 'The %' THEN substr(b.primaryTitle, 5) ELSE b.primaryTitle END"), order: 'asc' }
+      ])
 
-    // Transform each row: parse JSON array in `characters`
-    const formatted = credits.map((row) => ({
-      movieName:  row.movieName,
-      movieId:    row.movieId,
-      category:   row.category,
-      characters: row.characters ? JSON.parse(row.characters) : [],
-      imdbRating: row.imdbRating !== null ? row.imdbRating : null
-    }));
+    const roles = rawRoles.map(r => ({
+      movieName:  r.movieName,
+      movieId:    r.movieId,
+      category:   r.category,
+      characters: r.characters ? JSON.parse(r.characters) : [],
+      imdbRating: parseRating(r.imdbRating)
+    }))
 
-    return res.json(formatted);
+    return res.json({
+      id:        person.id,
+      name:      person.name,
+      birthYear: person.birthYear,
+      deathYear: person.deathYear,
+      roles
+    })
   } catch (err) {
-    console.error('❌ GET /people/:id/credits:', err.message);
-    return res.status(500).json({ error: true, message: err.message });
+    next(err)
   }
-};
+}
+
+exports.getPersonCredits = async (req, res, next) => {
+  try {
+    if (Object.keys(req.query).length > 0) {
+      return res.status(400).json({ error: true, message: 'Query parameters are not permitted.' })
+    }
+
+    const { id } = req.params
+    const exists = await knex('names').where({ nconst: id }).first()
+    if (!exists) {
+      return res.status(404).json({ error: true, message: 'No record exists of a person with this ID' })
+    }
+
+    const raw = await knex('principals as p')
+      .innerJoin('basics as b', 'p.tconst', 'b.tconst')
+      .leftJoin('ratings as r_imdb', function () {
+        this.on('b.tconst', '=', 'r_imdb.tconst')
+          .andOn('r_imdb.source', '=', knex.raw('?', ['Internet Movie Database']))
+      })
+      .select(
+        'b.primaryTitle as movieName',
+        'b.tconst       as movieId',
+        'b.year         as year',
+        'p.category',
+        'p.characters',
+        'r_imdb.value   as imdbRating'
+      )
+      .where('p.nconst', id)
+      .orderBy([
+        { column: 'b.year',         order: 'asc' },
+        { column: knex.raw("CASE WHEN b.primaryTitle LIKE 'The %' THEN substr(b.primaryTitle, 5) ELSE b.primaryTitle END"), order: 'asc' }
+      ])
+
+    const formatted = raw.map(r => ({
+      movieName:  r.movieName,
+      movieId:    r.movieId,
+      category:   r.category,
+      characters: r.characters ? JSON.parse(r.characters) : [],
+      imdbRating: parseRating(r.imdbRating)
+    }))
+
+    return res.json(formatted)
+  } catch (err) {
+    next(err)
+  }
+}

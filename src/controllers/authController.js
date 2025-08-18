@@ -1,7 +1,9 @@
-const bcrypt = require('bcryptjs')
-const jwt    = require('jsonwebtoken')
-const knex   = require('../db/knex')
-const { generateTokens } = require('../middleware/auth')
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const knex = require('../db/knex');
+const config = require('../config/env');
+const logger = require('../config/logger');
+const { generateTokens } = require('../middleware/auth');
 
 exports.register = async (req, res, next) => {
   try {
@@ -12,13 +14,17 @@ exports.register = async (req, res, next) => {
         message: 'Request body incomplete, both email and password are required'
       })
     }
-    const exists = await knex('users').where({ email }).first()
+    const exists = await knex('users').where({ email }).first();
     if (exists) {
-      return res.status(409).json({ error: true, message: 'User already exists' })
+      logger.warn('Registration attempt with existing email', { email, ip: req.ip });
+      return res.status(409).json({ error: true, message: 'User already exists' });
     }
-    const password_hash = await bcrypt.hash(password, 10)
-    await knex('users').insert({ email, password_hash })
-    return res.status(201).json({ message: 'User created' })
+    
+    const password_hash = await bcrypt.hash(password, 12);
+    await knex('users').insert({ email, password_hash });
+    
+    logger.info('New user registered', { email });
+    return res.status(201).json({ message: 'User created' });
   } catch (err) {
     next(err)
   }
@@ -33,10 +39,13 @@ exports.login = async (req, res, next) => {
         message: 'Request body incomplete, both email and password are required'
       })
     }
-    const user = await knex('users').where({ email }).first()
+    const user = await knex('users').where({ email }).first();
     if (!user || !(await bcrypt.compare(password, user.password_hash))) {
-      return res.status(401).json({ error: true, message: 'Incorrect email or password' })
+      logger.warn('Failed login attempt', { email, ip: req.ip });
+      return res.status(401).json({ error: true, message: 'Incorrect email or password' });
     }
+    
+    logger.info('Successful login', { userId: user.id, email });
 
     const opts = {}
     if (bearerExpiresInSeconds)  opts.bearerExpiresInSeconds  = bearerExpiresInSeconds
@@ -66,7 +75,7 @@ exports.refresh = async (req, res, next) => {
 
     let payload
     try {
-      payload = jwt.verify(refreshToken, process.env.JWT_SECRET)
+      payload = jwt.verify(refreshToken, config.jwtSecret)
     } catch (err) {
       if (err.name === 'TokenExpiredError') {
         return res.status(401).json({ error: true, message: 'JWT token has expired' })
@@ -74,13 +83,15 @@ exports.refresh = async (req, res, next) => {
       return res.status(401).json({ error: true, message: 'Invalid JWT token' })
     }
 
-    const stored = await knex('refresh_tokens').where({ token: refreshToken }).first()
+    const stored = await knex('refresh_tokens').where({ token: refreshToken }).first();
     if (!stored) {
-      return res.status(401).json({ error: true, message: 'Invalid JWT token' })
+      logger.warn('Refresh token not found in database', { ip: req.ip });
+      return res.status(401).json({ error: true, message: 'Invalid JWT token' });
     }
 
     // delete old refresh token
-    await knex('refresh_tokens').where({ token: refreshToken }).del()
+    await knex('refresh_tokens').where({ token: refreshToken }).del();
+    logger.info('Token refreshed', { userId: payload.sub });
 
     // issue new pair
     const { bearerToken, bearerExpires, refreshToken: newRef, refreshExpires } =
@@ -107,7 +118,7 @@ exports.logout = async (req, res, next) => {
 
     let payload
     try {
-      payload = jwt.verify(refreshToken, process.env.JWT_SECRET)
+      payload = jwt.verify(refreshToken, config.jwtSecret)
     } catch (err) {
       if (err.name === 'TokenExpiredError') {
         return res.status(401).json({ error: true, message: 'JWT token has expired' })
@@ -115,13 +126,15 @@ exports.logout = async (req, res, next) => {
       return res.status(401).json({ error: true, message: 'Invalid JWT token' })
     }
 
-    const stored = await knex('refresh_tokens').where({ token: refreshToken }).first()
+    const stored = await knex('refresh_tokens').where({ token: refreshToken }).first();
     if (!stored) {
-      return res.status(401).json({ error: true, message: 'Invalid JWT token' })
+      logger.warn('Logout attempt with invalid refresh token', { ip: req.ip });
+      return res.status(401).json({ error: true, message: 'Invalid JWT token' });
     }
 
-    await knex('refresh_tokens').where({ token: refreshToken }).del()
-    return res.json({ error: false, message: 'Token successfully invalidated' })
+    await knex('refresh_tokens').where({ token: refreshToken }).del();
+    logger.info('User logged out', { userId: payload.sub });
+    return res.json({ error: false, message: 'Token successfully invalidated' });
   } catch (err) {
     next(err)
   }

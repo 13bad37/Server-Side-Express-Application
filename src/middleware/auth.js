@@ -1,6 +1,8 @@
-const jwt  = require('jsonwebtoken')
-const knex = require('../db/knex')
-const JWT_SECRET = process.env.JWT_SECRET
+const jwt = require('jsonwebtoken');
+const knex = require('../db/knex');
+const config = require('../config/env');
+const logger = require('../config/logger');
+const JWT_SECRET = config.jwtSecret;
 
 /**
  * Issue a new pair of (Bearer, Refresh) tokens and store the refresh one in the DB.
@@ -50,18 +52,30 @@ function authenticate(req, res, next) {
   const token = parts[1]
   jwt.verify(token, JWT_SECRET, async (err, payload) => {
     if (err) {
+      logger.warn('Authentication failed', { 
+        ip: req.ip, 
+        userAgent: req.get('User-Agent'),
+        error: err.message 
+      });
       if (err.name === 'TokenExpiredError') {
-        return res.status(401).json({ error: true, message: 'JWT token has expired' })
+        return res.status(401).json({ error: true, message: 'JWT token has expired' });
       }
-      return res.status(401).json({ error: true, message: 'Invalid JWT token' })
+      return res.status(401).json({ error: true, message: 'Invalid JWT token' });
     }
-    // ensure the user still exists
-    const user = await knex('users').where({ id: payload.sub }).first()
-    if (!user) {
-      return res.status(401).json({ error: true, message: 'Invalid JWT token' })
+    
+    try {
+      // ensure the user still exists
+      const user = await knex('users').where({ id: payload.sub }).first();
+      if (!user) {
+        logger.warn('Token valid but user not found', { userId: payload.sub, ip: req.ip });
+        return res.status(401).json({ error: true, message: 'Invalid JWT token' });
+      }
+      req.user = { id: payload.sub };
+      next();
+    } catch (dbError) {
+      logger.error('Database error during authentication', { error: dbError.message, userId: payload.sub });
+      return res.status(500).json({ error: true, message: 'Internal server error' });
     }
-    req.user = { id: payload.sub }
-    next()
   })
 }
 
@@ -77,11 +91,18 @@ function optionalAuthenticate(req, res, next) {
       .status(401)
       .json({ error: true, message: "Authorization header ('Bearer token') not found" })
   }
-  jwt.verify(parts[1], JWT_SECRET, (err, payload) => {
+  jwt.verify(parts[1], JWT_SECRET, async (err, payload) => {
     if (!err) {
-      req.user = { id: payload.sub }
+      try {
+        const user = await knex('users').where({ id: payload.sub }).first();
+        if (user) {
+          req.user = { id: payload.sub };
+        }
+      } catch (dbError) {
+        logger.error('Database error during optional authentication', { error: dbError.message });
+      }
     }
-    next()
+    next();
   })
 }
 

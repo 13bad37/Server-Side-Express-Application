@@ -1,4 +1,5 @@
-const knex = require('../db/knex')
+const knex = require('../db/knex');
+const logger = require('../config/logger');
 
 // parse rating into number or null
 const parseRating = (r) => {
